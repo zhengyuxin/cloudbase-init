@@ -15,22 +15,14 @@
 
 import os
 
-from oslo.config import cfg
+import six
 
-from cloudbaseinit.openstack.common import log as logging
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit.plugins.common.userdataplugins import base
 from cloudbaseinit.plugins.common import userdatautils
 from cloudbaseinit.utils import encoding
 
-opts = [
-    cfg.StrOpt('heat_config_dir', default='C:\\cfn', help='The directory '
-               'where the Heat configuration files must be saved'),
-]
-
-CONF = cfg.CONF
-CONF.register_opts(opts)
-
-LOG = logging.getLogger(__name__)
+CONF = cloudbaseinit_conf.CONF
 
 
 class HeatPlugin(base.BaseUserDataPlugin):
@@ -51,4 +43,10 @@ class HeatPlugin(base.BaseUserDataPlugin):
         encoding.write_file(file_name, part.get_payload())
 
         if part.get_filename() == self._heat_user_data_filename:
-            return userdatautils.execute_user_data_script(part.get_payload())
+            payload = part.get_payload()
+            # Normalize the payload to bytes, since `execute_user_data_script`
+            # operates on bytes and `get_payload` returns a string on
+            # Python 3.
+            if isinstance(payload, six.text_type):
+                payload = payload.encode()
+            return userdatautils.execute_user_data_script(payload)

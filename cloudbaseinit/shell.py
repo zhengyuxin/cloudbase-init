@@ -12,21 +12,36 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import struct
 import sys
 
-from oslo.config import cfg
+if struct.calcsize("P") == 8 and sys.platform == 'win32':
+    # This is needed by Nano Server.
+    # Set COINIT_MULTITHREADED only on x64 interpreters due to issues on x86.
+    import pythoncom
+    sys.coinit_flags = pythoncom.COINIT_MULTITHREADED
+    pythoncom.CoInitializeEx(pythoncom.COINIT_MULTITHREADED)
 
+from oslo_log import log as oslo_logging
+
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit import init
 from cloudbaseinit.utils import log as logging
 
-CONF = cfg.CONF
+CONF = cloudbaseinit_conf.CONF
+
+LOG = oslo_logging.getLogger(__name__)
 
 
 def main():
     CONF(sys.argv[1:])
     logging.setup('cloudbaseinit')
 
-    init.InitManager().configure_host()
+    try:
+        init.InitManager().configure_host()
+    except Exception as exc:
+        LOG.exception(exc)
+        raise
 
 
 if __name__ == "__main__":

@@ -21,24 +21,30 @@ try:
     import unittest.mock as mock
 except ImportError:
     import mock
-from oslo.config import cfg
 
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit.metadata.services import base
 from cloudbaseinit.metadata.services import baseopenstackservice
 from cloudbaseinit.tests.metadata import fake_json_response
 from cloudbaseinit.utils import x509constants
 
 
-CONF = cfg.CONF
+CONF = cloudbaseinit_conf.CONF
 
 MODPATH = "cloudbaseinit.metadata.services.baseopenstackservice"
+
+
+class FinalBaseOpenStackService(baseopenstackservice.BaseOpenStackService):
+
+    def _get_data(self):
+        pass
 
 
 class TestBaseOpenStackService(unittest.TestCase):
 
     def setUp(self):
         CONF.set_override("retry_count_interval", 0)
-        self._service = baseopenstackservice.BaseOpenStackService()
+        self._service = FinalBaseOpenStackService()
         date = "2013-04-04"
         fake_metadata = fake_json_response.get_fake_metadata_json(date)
         self._fake_network_config = fake_metadata["network_config"]

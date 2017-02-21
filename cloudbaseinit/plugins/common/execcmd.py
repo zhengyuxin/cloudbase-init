@@ -19,12 +19,13 @@ import re
 import tempfile
 import uuid
 
-from cloudbaseinit.openstack.common import log as logging
+from oslo_log import log as oslo_logging
+
 from cloudbaseinit.osutils import factory as osutils_factory
 from cloudbaseinit.plugins.common import base
 
 
-LOG = logging.getLogger(__name__)
+LOG = oslo_logging.getLogger(__name__)
 
 # used with ec2 config files (xmls)
 SCRIPT_TAG = 1
@@ -40,6 +41,8 @@ TAG_REGEX = {
         "ps1"
     )
 }
+
+NO_REBOOT = 0
 
 # important return values range
 RET_START = 1001

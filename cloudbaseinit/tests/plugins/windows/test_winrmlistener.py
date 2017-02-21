@@ -19,11 +19,12 @@ try:
     import unittest.mock as mock
 except ImportError:
     import mock
-from oslo.config import cfg
 
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit.plugins.common import base
+from cloudbaseinit.tests import testutils
 
-CONF = cfg.CONF
+CONF = cloudbaseinit_conf.CONF
 
 
 class ConfigWinRMListenerPluginTests(unittest.TestCase):
@@ -60,8 +61,16 @@ class ConfigWinRMListenerPluginTests(unittest.TestCase):
         mock_osutils.get_service_start_mode.return_value = 'fake start'
         mock_osutils.get_service_status.return_value = 'fake status'
 
-        response = self._winrmlistener._check_winrm_service(mock_osutils)
+        with testutils.LogSnatcher('cloudbaseinit.plugins.windows.'
+                                   'winrmlistener') as snatcher:
+            response = self._winrmlistener._check_winrm_service(mock_osutils)
+
         if not service_exists:
+            expected_logging = [
+                "Cannot configure the WinRM listener as the service "
+                "is not available"
+            ]
+            self.assertEqual(expected_logging, snatcher.output)
             self.assertFalse(response)
         else:
 

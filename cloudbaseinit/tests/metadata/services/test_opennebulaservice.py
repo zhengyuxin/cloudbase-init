@@ -17,10 +17,14 @@ import re
 import textwrap
 import unittest
 
-import mock
+try:
+    import unittest.mock as mock
+except ImportError:
+    import mock
 
 from cloudbaseinit.metadata.services import base
 from cloudbaseinit.metadata.services import opennebulaservice
+from cloudbaseinit.tests import testutils
 
 
 MAC = "54:EE:75:19:F4:61"    # output must be upper
@@ -96,6 +100,8 @@ ETH1_MAC='{mac}'
     mac=MAC.lower()
 )
 
+OPEN = mock.mock_open(read_data=CONTEXT.encode())
+
 
 def _get_nic_details(iid=0):
         details = base.NetworkDetails(
@@ -119,9 +125,12 @@ class _TestOpenNebulaService(unittest.TestCase):
         self._service = opennebulaservice.OpenNebulaService()
 
 
-@mock.patch("six.moves.builtins.open",
-            new=mock.mock_open(read_data=CONTEXT.encode()))
+@mock.patch("six.moves.builtins.open", new=OPEN)
 class TestOpenNebulaService(_TestOpenNebulaService):
+
+    @classmethod
+    def setUpClass(cls):
+        OPEN.return_value.read.return_value = CONTEXT.encode()
 
     def _test_parse_shell_variables(self, crlf=False, comment=False):
         content = textwrap.dedent("""
@@ -207,7 +216,9 @@ class TestOpenNebulaService(_TestOpenNebulaService):
             if level > 2:
                 mock_os_path.isfile.return_value = True
         # run the method being tested
-        ret = self._service.load()
+        with testutils.LogSnatcher('cloudbaseinit.metadata.services.'
+                                   'opennebulaservice'):
+            ret = self._service.load()
         # check calls
         if level > 0:
             mock_osutils_factory.get_os_utils.assert_called_once_with()

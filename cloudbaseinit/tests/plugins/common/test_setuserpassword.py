@@ -18,14 +18,16 @@ try:
     import unittest.mock as mock
 except ImportError:
     import mock
-from oslo.config import cfg
 
+
+from cloudbaseinit import conf as cloudbaseinit_conf
+from cloudbaseinit import constant
 from cloudbaseinit.plugins.common import constants
 from cloudbaseinit.plugins.common import setuserpassword
 from cloudbaseinit.tests.metadata import fake_json_response
 from cloudbaseinit.tests import testutils
 
-CONF = cfg.CONF
+CONF = cloudbaseinit_conf.CONF
 
 
 class SetUserPasswordPluginTests(unittest.TestCase):
@@ -83,10 +85,19 @@ class SetUserPasswordPluginTests(unittest.TestCase):
         mock_service = mock.MagicMock()
         mock_service.get_admin_password.return_value = expected_password
 
-        with testutils.ConfPatcher('inject_user_password', inject_password):
-            response = self._setpassword_plugin._get_password(mock_service,
-                                                              shared_data)
+        with testutils.LogSnatcher('cloudbaseinit.plugins.common.'
+                                   'setuserpassword') as snatcher:
+            with testutils.ConfPatcher('inject_user_password',
+                                       inject_password):
+                response = self._setpassword_plugin._get_password(
+                    mock_service, shared_data)
+
+        expected_logging = [
+            'Using admin_pass metadata user password. '
+            'Consider changing it as soon as possible'
+        ]
         if inject_password:
+            self.assertEqual(expected_logging, snatcher.output)
             mock_service.get_admin_password.assert_called_with()
             expected_password = (expected_password, True)
         else:
@@ -156,10 +167,11 @@ class SetUserPasswordPluginTests(unittest.TestCase):
         self.assertEqual(expected_logging, snatcher.output)
 
     @mock.patch('cloudbaseinit.plugins.common.setuserpassword.'
-                'SetUserPasswordPlugin.post_set_password')
+                'SetUserPasswordPlugin._change_logon_behaviour')
     @mock.patch('cloudbaseinit.plugins.common.setuserpassword.'
                 'SetUserPasswordPlugin._get_password')
-    def _test_set_password(self, mock_get_password, mock_post_set_password,
+    def _test_set_password(self, mock_get_password,
+                           mock_change_logon_behaviour,
                            password, can_update_password,
                            is_password_changed, injected=False):
         expected_password = password
@@ -196,8 +208,8 @@ class SetUserPasswordPluginTests(unittest.TestCase):
         self.assertEqual(expected_password, response)
         self.assertEqual(expected_logging, snatcher.output)
         if password and can_update_password and is_password_changed:
-            mock_post_set_password.assert_called_once_with(
-                user, expected_password, password_injected=injected)
+            mock_change_logon_behaviour.assert_called_once_with(
+                user, password_injected=injected)
 
     def test_set_password(self):
         self._test_set_password(password='Password',
@@ -268,3 +280,52 @@ class SetUserPasswordPluginTests(unittest.TestCase):
         self._test_execute(is_password_set=False, can_post_password=True)
         self._test_execute(is_password_set=True, can_post_password=True,
                            can_update_password=True)
+
+    @mock.patch.object(setuserpassword.osutils_factory, 'get_os_utils')
+    @testutils.ConfPatcher('first_logon_behaviour',
+                           constant.NEVER_CHANGE)
+    def test_logon_behaviour_never_change(self, mock_get_os_utils):
+        self._setpassword_plugin._change_logon_behaviour(
+            mock.sentinel.username)
+
+        self.assertFalse(mock_get_os_utils.called)
+
+    @testutils.ConfPatcher('first_logon_behaviour',
+                           constant.ALWAYS_CHANGE)
+    @mock.patch.object(setuserpassword, 'osutils_factory')
+    def test_logon_behaviour_always(self, mock_factory):
+        self._setpassword_plugin._change_logon_behaviour(
+            mock.sentinel.username)
+
+        mock_get_os_utils = mock_factory.get_os_utils
+        self.assertTrue(mock_get_os_utils.called)
+        osutils = mock_get_os_utils.return_value
+        osutils.change_password_next_logon.assert_called_once_with(
+            mock.sentinel.username)
+
+    @testutils.ConfPatcher('first_logon_behaviour',
+                           constant.CLEAR_TEXT_INJECTED_ONLY)
+    @mock.patch.object(setuserpassword, 'osutils_factory')
+    def test_change_logon_behaviour_clear_text_password_not_injected(
+            self, mock_factory):
+        self._setpassword_plugin._change_logon_behaviour(
+            mock.sentinel.username,
+            password_injected=False)
+
+        mock_get_os_utils = mock_factory.get_os_utils
+        self.assertFalse(mock_get_os_utils.called)
+
+    @testutils.ConfPatcher('first_logon_behaviour',
+                           constant.CLEAR_TEXT_INJECTED_ONLY)
+    @mock.patch.object(setuserpassword, 'osutils_factory')
+    def test_logon_behaviour_clear_text_password_injected(
+            self, mock_factory):
+        self._setpassword_plugin._change_logon_behaviour(
+            mock.sentinel.username,
+            password_injected=True)
+
+        mock_get_os_utils = mock_factory.get_os_utils
+        self.assertTrue(mock_get_os_utils.called)
+        osutils = mock_get_os_utils.return_value
+        osutils.change_password_next_logon.assert_called_once_with(
+            mock.sentinel.username)

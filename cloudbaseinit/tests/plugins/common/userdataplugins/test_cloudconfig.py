@@ -19,12 +19,11 @@ try:
 except ImportError:
     import mock
 
-from oslo.config import cfg
-
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit.plugins.common.userdataplugins import cloudconfig
 from cloudbaseinit.tests import testutils
 
-CONF = cfg.CONF
+CONF = cloudbaseinit_conf.CONF
 
 
 class CloudConfigPluginTests(unittest.TestCase):
@@ -53,11 +52,16 @@ class CloudConfigPluginTests(unittest.TestCase):
             CONF.cloud_config_plugins = orig
 
     def test_executor_from_yaml(self):
+        expected_logging = ["Invalid yaml stream provided."]
         for invalid in (mock.sentinel.yaml, None, 1, int):
-            with self.assertRaises(cloudconfig.CloudConfigError) as cm:
-                cloudconfig.CloudConfigPluginExecutor.from_yaml(invalid)
-            self.assertEqual("Invalid yaml stream provided.",
-                             str(cm.exception))
+            with testutils.LogSnatcher('cloudbaseinit.plugins.'
+                                       'common.userdataplugins.'
+                                       'cloudconfig') as snatcher:
+                with self.assertRaises(cloudconfig.CloudConfigError) as cm:
+                    cloudconfig.CloudConfigPluginExecutor.from_yaml(invalid)
+                self.assertEqual(expected_logging, snatcher.output)
+                self.assertEqual("Invalid yaml stream provided.",
+                                 str(cm.exception))
 
         executor = cloudconfig.CloudConfigPluginExecutor.from_yaml('{}')
         self.assertIsInstance(executor, cloudconfig.CloudConfigPluginExecutor)

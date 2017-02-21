@@ -14,26 +14,19 @@
 
 import socket
 
-from oslo.config import cfg
+from oslo_log import log as oslo_logging
 
-from cloudbaseinit.openstack.common import log as logging
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit.osutils import factory as osutils_factory
 from cloudbaseinit.plugins.common import base
 from cloudbaseinit.utils import dhcp
 
-opts = [
-    cfg.BoolOpt('ntp_use_dhcp_config', default=False,
-                help='Configures NTP client time synchronization using '
-                     'the NTP servers provided via DHCP'),
-]
-
-CONF = cfg.CONF
-CONF.register_opts(opts)
-
-LOG = logging.getLogger(__name__)
+CONF = cloudbaseinit_conf.CONF
+LOG = oslo_logging.getLogger(__name__)
 
 
 class NTPClientPlugin(base.BasePlugin):
+    execution_stage = base.PLUGIN_STAGE_PRE_NETWORKING
 
     def verify_time_service(self, osutils):
         """Verify that the time service is up.

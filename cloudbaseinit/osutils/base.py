@@ -82,6 +82,9 @@ class BaseOSUtils(object):
     def wait_for_boot_completion(self):
         pass
 
+    def reset_service_password(self):
+        return False
+
     def terminate(self):
         pass
 
@@ -113,4 +116,20 @@ class BaseOSUtils(object):
 
     def set_timezone(self, timezone):
         """Set the timezone for this instance."""
+        raise NotImplementedError()
+
+    def change_password_next_logon(self, username):
+        """Force the given user to change his password at the next login."""
+        raise NotImplementedError()
+
+    def set_service_credentials(self, service_name, username, password):
+        """Set the username and password for a given service."""
+        raise NotImplementedError()
+
+    def get_service_username(self, service_name):
+        """Retrieve the username under which a service runs."""
+        raise NotImplementedError()
+
+    def get_current_user(self):
+        """Retrieve the username under which the current thread runs."""
         raise NotImplementedError()

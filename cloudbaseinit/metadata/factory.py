@@ -12,33 +12,15 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo.config import cfg
+from oslo_log import log as oslo_logging
 
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit import exception
-from cloudbaseinit.openstack.common import log as logging
 from cloudbaseinit.utils import classloader
 
-opts = [
-    cfg.ListOpt(
-        'metadata_services',
-        default=[
-            'cloudbaseinit.metadata.services.httpservice.HttpService',
-            'cloudbaseinit.metadata.services.configdrive.ConfigDriveService',
-            'cloudbaseinit.metadata.services.ec2service.EC2Service',
-            'cloudbaseinit.metadata.services.maasservice.MaaSHttpService',
-            'cloudbaseinit.metadata.services.cloudstack.CloudStack',
-            'cloudbaseinit.metadata.services'
-            '.opennebulaservice.OpenNebulaService',
-        ],
-        help='List of enabled metadata service classes, '
-        'to be tested for availability in the provided order. '
-        'The first available service will be used to retrieve '
-        'metadata')
-]
 
-CONF = cfg.CONF
-CONF.register_opts(opts)
-LOG = logging.getLogger(__name__)
+CONF = cloudbaseinit_conf.CONF
+LOG = oslo_logging.getLogger(__name__)
 
 
 def get_metadata_service():
@@ -52,4 +34,4 @@ def get_metadata_service():
         except Exception as ex:
             LOG.error("Failed to load metadata service '%s'" % class_path)
             LOG.exception(ex)
-    raise exception.CloudbaseInitException("No available service found")
+    raise exception.MetadaNotFoundException("No available service found")

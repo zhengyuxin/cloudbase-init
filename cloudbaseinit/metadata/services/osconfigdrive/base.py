@@ -13,11 +13,17 @@
 #    under the License.
 
 import abc
+import tempfile
+
+import six
 
 
+@six.add_metaclass(abc.ABCMeta)
 class BaseConfigDriveManager(object):
 
+    def __init__(self):
+        self.target_path = tempfile.mkdtemp()
+
     @abc.abstractmethod
-    def get_config_drive_files(self, target_path, check_raw_hhd=True,
-                               check_cdrom=True, check_vfat=True):
+    def get_config_drive_files(self, check_types=None, check_locations=None):
         pass

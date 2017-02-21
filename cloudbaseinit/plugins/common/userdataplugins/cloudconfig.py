@@ -13,31 +13,20 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo.config import cfg
+from oslo_log import log as oslo_logging
 import yaml
 
-from cloudbaseinit.openstack.common import log as logging
+from cloudbaseinit import conf as cloudbaseinit_conf
+from cloudbaseinit.plugins.common import execcmd
 from cloudbaseinit.plugins.common.userdataplugins import base
 from cloudbaseinit.plugins.common.userdataplugins.cloudconfigplugins import (
     factory
 )
 
 
-LOG = logging.getLogger(__name__)
-OPTS = [
-    cfg.ListOpt(
-        'cloud_config_plugins',
-        default=[],
-        help=(
-            'List which contains the name of the cloud config plugins '
-            'ordered by priority.'
-        ),
-    )
-]
-CONF = cfg.CONF
-CONF.register_opts(OPTS)
+CONF = cloudbaseinit_conf.CONF
+LOG = oslo_logging.getLogger(__name__)
 DEFAULT_ORDER_VALUE = 999
-REBOOT = 1001
 
 
 class CloudConfigError(Exception):
@@ -80,7 +69,7 @@ class CloudConfigPluginExecutor(object):
 
     def execute(self):
         """Call each plugin, in the order requested by the user."""
-        reboot = 0
+        reboot = execcmd.NO_REBOOT
         plugins = factory.load_plugins()
         for plugin_name, value in self._expected_plugins:
             method = plugins.get(plugin_name)
@@ -91,7 +80,7 @@ class CloudConfigPluginExecutor(object):
             try:
                 requires_reboot = method(value)
                 if requires_reboot:
-                    reboot = REBOOT
+                    reboot = execcmd.RET_END
             except Exception:
                 LOG.exception("Processing plugin %s failed", plugin_name)
         return reboot

@@ -13,41 +13,30 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import posixpath
+from oslo_log import log as oslo_logging
 
-from oslo.config import cfg
-from six.moves.urllib import error
-from six.moves.urllib import request
-
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit.metadata.services import base
-from cloudbaseinit.openstack.common import log as logging
 from cloudbaseinit.utils import network
 
-opts = [
-    cfg.StrOpt('ec2_metadata_base_url',
-               default='http://169.254.169.254/',
-               help='The base URL where the service looks for metadata'),
-    cfg.BoolOpt('ec2_add_metadata_private_ip_route', default=True,
-                help='Add a route for the metadata ip address to the gateway'),
-]
-
-CONF = cfg.CONF
-CONF.register_opts(opts)
-
-LOG = logging.getLogger(__name__)
+CONF = cloudbaseinit_conf.CONF
+LOG = oslo_logging.getLogger(__name__)
 
 
-class EC2Service(base.BaseMetadataService):
+class EC2Service(base.BaseHTTPMetadataService):
     _metadata_version = '2009-04-04'
 
     def __init__(self):
-        super(EC2Service, self).__init__()
+        super(EC2Service, self).__init__(
+            base_url=CONF.ec2.metadata_base_url,
+            https_allow_insecure=CONF.ec2.https_allow_insecure,
+            https_ca_bundle=CONF.ec2.https_ca_bundle)
         self._enable_retry = True
 
     def load(self):
         super(EC2Service, self).load()
-        if CONF.ec2_add_metadata_private_ip_route:
-            network.check_metadata_ip_route(CONF.ec2_metadata_base_url)
+        if CONF.ec2.add_metadata_private_ip_route:
+            network.check_metadata_ip_route(CONF.ec2.metadata_base_url)
 
         try:
             self.get_host_name()
@@ -55,26 +44,8 @@ class EC2Service(base.BaseMetadataService):
         except Exception as ex:
             LOG.exception(ex)
             LOG.debug('Metadata not found at URL \'%s\'' %
-                      CONF.ec2_metadata_base_url)
+                      CONF.ec2.metadata_base_url)
             return False
-
-    def _get_response(self, req):
-        try:
-            return request.urlopen(req)
-        except error.HTTPError as ex:
-            if ex.code == 404:
-                raise base.NotExistingMetadataException()
-            else:
-                raise
-
-    def _get_data(self, path):
-        norm_path = posixpath.join(CONF.ec2_metadata_base_url, path)
-
-        LOG.debug('Getting metadata from: %(norm_path)s',
-                  {'norm_path': norm_path})
-        req = request.Request(norm_path)
-        response = self._get_response(req)
-        return response.read()
 
     def get_host_name(self):
         return self._get_cache_data('%s/meta-data/local-hostname' %

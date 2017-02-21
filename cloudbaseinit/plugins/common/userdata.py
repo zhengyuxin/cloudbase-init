@@ -13,11 +13,10 @@
 #    under the License.
 
 import email
-import gzip
-import io
+
+from oslo_log import log as oslo_logging
 
 from cloudbaseinit.metadata.services import base as metadata_services_base
-from cloudbaseinit.openstack.common import log as logging
 from cloudbaseinit.plugins.common import base
 from cloudbaseinit.plugins.common import execcmd
 from cloudbaseinit.plugins.common.userdataplugins import factory
@@ -26,7 +25,7 @@ from cloudbaseinit.utils import encoding
 from cloudbaseinit.utils import x509constants
 
 
-LOG = logging.getLogger(__name__)
+LOG = oslo_logging.getLogger(__name__)
 
 
 class UserDataPlugin(base.BasePlugin):
@@ -35,7 +34,7 @@ class UserDataPlugin(base.BasePlugin):
 
     def execute(self, service, shared_data):
         try:
-            user_data = service.get_user_data()
+            user_data = service.get_decoded_user_data()
         except metadata_services_base.NotExistingMetadataException:
             return base.PLUGIN_EXECUTION_DONE, False
 
@@ -43,17 +42,7 @@ class UserDataPlugin(base.BasePlugin):
             return base.PLUGIN_EXECUTION_DONE, False
 
         LOG.debug('User data content length: %d' % len(user_data))
-        user_data = self._check_gzip_compression(user_data)
-
         return self._process_user_data(user_data)
-
-    def _check_gzip_compression(self, user_data):
-        if user_data[:2] == self._GZIP_MAGIC_NUMBER:
-            bio = io.BytesIO(user_data)
-            with gzip.GzipFile(fileobj=bio, mode='rb') as f:
-                user_data = f.read()
-
-        return user_data
 
     @staticmethod
     def _parse_mime(user_data):

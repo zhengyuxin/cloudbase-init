@@ -12,32 +12,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo.config import cfg
-
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit.utils import classloader
 
-opts = [
-    cfg.ListOpt(
-        'user_data_plugins',
-        default=[
-            'cloudbaseinit.plugins.common.userdataplugins.parthandler.'
-            'PartHandlerPlugin',
-            'cloudbaseinit.plugins.common.userdataplugins.cloudconfig.'
-            'CloudConfigPlugin',
-            'cloudbaseinit.plugins.common.userdataplugins.cloudboothook.'
-            'CloudBootHookPlugin',
-            'cloudbaseinit.plugins.common.userdataplugins.shellscript.'
-            'ShellScriptPlugin',
-            'cloudbaseinit.plugins.common.userdataplugins.multipartmixed.'
-            'MultipartMixedPlugin',
-            'cloudbaseinit.plugins.common.userdataplugins.heat.'
-            'HeatPlugin',
-        ],
-        help='List of enabled userdata content plugins'),
-]
-
-CONF = cfg.CONF
-CONF.register_opts(opts)
+CONF = cloudbaseinit_conf.CONF
 
 
 def load_plugins():

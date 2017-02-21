@@ -16,24 +16,16 @@
 import json
 import posixpath
 
-from oslo.config import cfg
+from oslo_log import log as oslo_logging
 
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit.metadata.services import base
-from cloudbaseinit.openstack.common import log as logging
 from cloudbaseinit.utils import debiface
 from cloudbaseinit.utils import encoding
 from cloudbaseinit.utils import x509constants
 
-
-opts = [
-    cfg.StrOpt('metadata_base_url', default='http://169.254.169.254/',
-               help='The base URL where the service looks for metadata'),
-]
-
-CONF = cfg.CONF
-CONF.register_opts(opts)
-
-LOG = logging.getLogger(__name__)
+CONF = cloudbaseinit_conf.CONF
+LOG = oslo_logging.getLogger(__name__)
 
 
 class BaseOpenStackService(base.BaseMetadataService):

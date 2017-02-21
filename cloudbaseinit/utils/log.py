@@ -16,76 +16,91 @@ import logging
 import serial
 import six
 
-from oslo.config import cfg
+from oslo_log import formatters
+from oslo_log import log
 
-from cloudbaseinit.openstack.common import log as openstack_logging
+from cloudbaseinit import conf as cloudbaseinit_conf
 
-opts = [
-    cfg.StrOpt('logging_serial_port_settings', default=None,
-               help='Serial port logging settings. Format: '
-               '"port,baudrate,parity,bytesize", e.g.: "COM1,115200,N,8". '
-               'Set to None (default) to disable.'),
-]
+CONF = cloudbaseinit_conf.CONF
+LOG = log.getLogger(__name__)
 
-CONF = cfg.CONF
-CONF.register_opts(opts)
-CONF.import_opt('log_date_format', 'cloudbaseinit.openstack.common.log')
 
-LOG = openstack_logging.getLogger(__name__)
+def _safe_write(function):
+    """Avoid issues related to unicode strings handling."""
+    def _wrapper(message):
+        # Unicode strings are not properly handled by the serial module
+        if isinstance(message, six.text_type):
+            function(message.encode("utf-8"))
+        else:
+            function(message)
+    return _wrapper
+
+
+def release_logging_handlers(product_name):
+    """Closes any currently used logging port handlers.
+
+    Resulting in the stream, file and serial port handler being closed
+    and removed from the logging object.
+    """
+    log_root = log.getLogger(product_name).logger
+    for handler in log_root.handlers:
+        log_root.removeHandler(handler)
+        handler.close()
 
 
 class SerialPortHandler(logging.StreamHandler):
 
-    class _UnicodeToBytesStream(object):
-
-        def __init__(self, stream):
-            self._stream = stream
-
-        def write(self, data):
-            if self._stream and not self._stream.isOpen():
-                    self._stream.open()
-
-            if isinstance(data, six.text_type):
-                self._stream.write(data.encode("utf-8"))
-            else:
-                self._stream.write(data)
-
     def __init__(self):
-        self._port = None
+        super(SerialPortHandler, self).__init__(None)
+        self.stream = None
 
+    @staticmethod
+    def _open():
+        serial_port = None
         if CONF.logging_serial_port_settings:
             settings = CONF.logging_serial_port_settings.split(',')
-
             try:
-                self._port = serial.Serial(port=settings[0],
-                                           baudrate=int(settings[1]),
-                                           parity=settings[2],
-                                           bytesize=int(settings[3]))
-                if not self._port.isOpen():
-                    self._port.open()
-            except serial.SerialException as ex:
-                # Log to other handlers
-                LOG.exception(ex)
+                serial_port = serial.Serial(port=settings[0],
+                                            baudrate=int(settings[1]),
+                                            parity=settings[2],
+                                            bytesize=int(settings[3]))
+                if not serial_port.isOpen():
+                    serial_port.open()
+                serial_port.write = _safe_write(serial_port.write)
+            except serial.SerialException as exc:
+                LOG.debug(exc)
+        return serial_port
 
-        # Unicode strings are not properly handled by the serial module
-        super(SerialPortHandler, self).__init__(
-            self._UnicodeToBytesStream(self._port))
+    def emit(self, record):
+        """Emit a record."""
+        if self.stream is None:
+            self.stream = self._open()
+
+        super(SerialPortHandler, self).emit(record)
 
     def close(self):
-        if self._port and self._port.isOpen():
-            self._port.close()
+        """Closes the serial port."""
+        self.acquire()
+        try:
+            serial_port = self.stream
+            if serial_port and serial_port.isOpen():
+                self.stream = None
+                serial_port.close()
+            logging.Handler.close(self)
+        finally:
+            self.release()
 
 
 def setup(product_name):
-    openstack_logging.setup(product_name)
+    log.setup(CONF, product_name)
 
     if CONF.logging_serial_port_settings:
-        log_root = openstack_logging.getLogger(product_name).logger
+        log_root = log.getLogger(product_name).logger
 
         serialportlog = SerialPortHandler()
         log_root.addHandler(serialportlog)
 
         datefmt = CONF.log_date_format
         serialportlog.setFormatter(
-            openstack_logging.ContextFormatter(project=product_name,
-                                               datefmt=datefmt))
+            formatters.ContextFormatter(project=product_name,
+                                        datefmt=datefmt))

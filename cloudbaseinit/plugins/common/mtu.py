@@ -14,26 +14,19 @@
 
 import struct
 
-from oslo.config import cfg
+from oslo_log import log as oslo_logging
 
-from cloudbaseinit.openstack.common import log as logging
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit.osutils import factory as osutils_factory
 from cloudbaseinit.plugins.common import base
 from cloudbaseinit.utils import dhcp
 
-opts = [
-    cfg.BoolOpt('mtu_use_dhcp_config', default=True,
-                help='Configures the network interfaces MTU based on the '
-                     'values provided via DHCP'),
-]
-
-CONF = cfg.CONF
-CONF.register_opts(opts)
-
-LOG = logging.getLogger(__name__)
+CONF = cloudbaseinit_conf.CONF
+LOG = oslo_logging.getLogger(__name__)
 
 
 class MTUPlugin(base.BasePlugin):
+    execution_stage = base.PLUGIN_STAGE_PRE_METADATA_DISCOVERY
 
     def execute(self, service, shared_data):
         if CONF.mtu_use_dhcp_config:

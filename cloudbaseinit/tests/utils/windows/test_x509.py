@@ -142,8 +142,9 @@ class CryptoAPICertManagerTests(unittest.TestCase):
                                 generate_key_ret_val=None)
 
     @mock.patch('cloudbaseinit.utils.windows.x509.free')
-    @mock.patch('copy.copy')
     @mock.patch('cloudbaseinit.utils.windows.x509.malloc')
+    @mock.patch('cloudbaseinit.utils.windows.x509.CryptoAPICertManager'
+                '._add_system_time_interval')
     @mock.patch('cloudbaseinit.utils.windows.x509.CryptoAPICertManager'
                 '._generate_key')
     @mock.patch('cloudbaseinit.utils.windows.x509.CryptoAPICertManager'
@@ -185,8 +186,9 @@ class CryptoAPICertManagerTests(unittest.TestCase):
                                       mock_CRYPTOAPI_BLOB,
                                       mock_CertStrToName,
                                       mock_uuid4, mock_get_cert_thumprint,
-                                      mock_generate_key, mock_malloc,
-                                      mock_copy, mock_free, certstr,
+                                      mock_generate_key,
+                                      mock_add_system_time_interval,
+                                      mock_malloc, mock_free, certstr,
                                       certificate, enhanced_key, store_handle,
                                       context_to_store):
 
@@ -215,7 +217,6 @@ class CryptoAPICertManagerTests(unittest.TestCase):
             mock_CRYPT_ALGORITHM_IDENTIFIER.assert_called_once_with()
             mock_SYSTEMTIME.assert_called_once_with()
             mock_GetSystemTime.assert_called_once_with(mock_byref())
-            mock_copy.assert_called_once_with(mock_SYSTEMTIME())
             mock_CertCreateSelfSignCertificate.assert_called_once_with(
                 None, mock_byref(), 0, mock_byref(),
                 mock_byref(), mock_byref(), mock_byref(), None)
@@ -228,7 +229,11 @@ class CryptoAPICertManagerTests(unittest.TestCase):
                 six.text_type(self.x509.STORE_NAME_MY))
             mock_get_cert_thumprint.assert_called_once_with(
                 mock_CertCreateSelfSignCertificate())
-
+            mock_add_system_time_interval.assert_has_calls(
+                [mock.call(mock_SYSTEMTIME.return_value,
+                           self.x509.X509_END_DATE_INTERVAL),
+                 mock.call(mock_SYSTEMTIME.return_value,
+                           self.x509.X509_START_DATE_INTERVAL)])
             mock_CertCloseStore.assert_called_once_with(store_handle, 0)
             mock_CertFreeCertificateContext.assert_called_once_with(
                 mock_CertCreateSelfSignCertificate())
@@ -237,6 +242,32 @@ class CryptoAPICertManagerTests(unittest.TestCase):
             self.assertEqual(mock_get_cert_thumprint.return_value, response)
 
         mock_generate_key.assert_called_once_with('fake_name', True)
+
+    @mock.patch('cloudbaseinit.utils.windows.cryptoapi.'
+                'SYSTEMTIME')
+    @mock.patch('cloudbaseinit.utils.windows.cryptoapi.'
+                'FILETIME')
+    @mock.patch('cloudbaseinit.utils.windows.cryptoapi.'
+                'SystemTimeToFileTime')
+    @mock.patch('cloudbaseinit.utils.windows.cryptoapi.'
+                'FileTimeToSystemTime')
+    def test_add_system_time_interval(self, mock_FileTimeToSystemTime,
+                                      mock_SystemTimeToFileTime,
+                                      mock_FILETIME, mock_SYSTEMTIME):
+        mock_system_time = mock.MagicMock()
+        fake_increment = 1
+        mock_byref = self._ctypes.byref
+
+        new_system_time = self._x509_manager._add_system_time_interval(
+            mock_system_time, fake_increment)
+
+        mock_FILETIME.assert_called_once_with()
+        mock_SystemTimeToFileTime.assert_called_once_with(mock_byref(),
+                                                          mock_byref())
+        mock_SYSTEMTIME.assert_called_once_with()
+        mock_FileTimeToSystemTime.assert_called_once_with(mock_byref(),
+                                                          mock_byref())
+        self.assertEqual(mock_SYSTEMTIME.return_value, new_system_time)
 
     def test_create_self_signed_cert(self):
         self._test_create_self_signed_cert(certstr='fake cert name',
@@ -303,12 +334,12 @@ class CryptoAPICertManagerTests(unittest.TestCase):
     @mock.patch('cloudbaseinit.utils.windows.cryptoapi.'
                 'CertOpenStore')
     @mock.patch('cloudbaseinit.utils.windows.cryptoapi.'
-                'CryptStringToBinaryA')
+                'CryptStringToBinaryW')
     @mock.patch('cloudbaseinit.utils.windows.x509.CryptoAPICertManager'
                 '._get_cert_base64')
     @mock.patch('cloudbaseinit.utils.windows.x509.malloc')
     def _test_import_cert(self, mock_malloc, mock_get_cert_base64,
-                          mock_CryptStringToBinaryA, mock_CertOpenStore,
+                          mock_CryptStringToBinaryW, mock_CertOpenStore,
                           mock_CertAddEncodedCertificateToStore,
                           mock_CertGetNameString,
                           mock_CertFreeCertificateContext,
@@ -327,7 +358,7 @@ class CryptoAPICertManagerTests(unittest.TestCase):
         fake_cert_data += 'fake cert' + '\n'
         fake_cert_data += x509constants.PEM_FOOTER
         mock_get_cert_base64.return_value = 'fake cert'
-        mock_CryptStringToBinaryA.return_value = crypttstr
+        mock_CryptStringToBinaryW.return_value = crypttstr
         mock_CertOpenStore.return_value = store_handle
         mock_CertAddEncodedCertificateToStore.return_value = add_enc_cert
         mock_CertGetNameString.side_effect = [2, upn_len]
@@ -355,7 +386,7 @@ class CryptoAPICertManagerTests(unittest.TestCase):
 
             mock_cast.assert_called_with(mock_malloc(), mock_POINTER())
             self.assertEqual(expected,
-                             mock_CryptStringToBinaryA.call_args_list)
+                             mock_CryptStringToBinaryW.call_args_list)
             mock_CertOpenStore.assert_called_with(
                 self.x509.cryptoapi.CERT_STORE_PROV_SYSTEM, 0, 0,
                 self.x509.cryptoapi.CERT_SYSTEM_STORE_LOCAL_MACHINE,
@@ -389,7 +420,7 @@ class CryptoAPICertManagerTests(unittest.TestCase):
         self._test_import_cert(crypttstr=True, store_handle='fake handle',
                                add_enc_cert='fake encoded cert', upn_len=2)
 
-    def test_import_cert_CryptStringToBinaryA_fail(self):
+    def test_import_cert_CryptStringToBinaryW_fail(self):
         self._test_import_cert(crypttstr=False, store_handle='fake handle',
                                add_enc_cert='fake encoded cert', upn_len=2)
 

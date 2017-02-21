@@ -12,29 +12,24 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import functools
+import os
 import sys
 
-from oslo.config import cfg
+from oslo_log import log as oslo_logging
 
+from cloudbaseinit import conf as cloudbaseinit_conf
+from cloudbaseinit import exception
 from cloudbaseinit.metadata import factory as metadata_factory
-from cloudbaseinit.openstack.common import log as logging
 from cloudbaseinit.osutils import factory as osutils_factory
 from cloudbaseinit.plugins.common import base as plugins_base
-from cloudbaseinit.plugins.common import factory as plugins_factory
+from cloudbaseinit.plugins import factory as plugins_factory
+from cloudbaseinit.utils import log as logging
 from cloudbaseinit import version
 
-opts = [
-    cfg.BoolOpt('allow_reboot', default=True, help='Allows OS reboots '
-                'requested by plugins'),
-    cfg.BoolOpt('stop_service_on_exit', default=True, help='In case of '
-                'execution as a service, specifies if the service '
-                'must be gracefully stopped before exiting'),
-]
 
-CONF = cfg.CONF
-CONF.register_opts(opts)
-
-LOG = logging.getLogger(__name__)
+CONF = cloudbaseinit_conf.CONF
+LOG = oslo_logging.getLogger(__name__)
 
 
 class InitManager(object):
@@ -57,7 +52,9 @@ class InitManager(object):
     def _exec_plugin(self, osutils, service, plugin, instance_id, shared_data):
         plugin_name = plugin.get_name()
 
-        status = self._get_plugin_status(osutils, instance_id, plugin_name)
+        status = None
+        if instance_id is not None:
+            status = self._get_plugin_status(osutils, instance_id, plugin_name)
         if status == plugins_base.PLUGIN_EXECUTION_DONE:
             LOG.debug('Plugin \'%s\' execution already done, skipping',
                       plugin_name)
@@ -66,8 +63,9 @@ class InitManager(object):
             try:
                 (status, reboot_required) = plugin.execute(service,
                                                            shared_data)
-                self._set_plugin_status(osutils, instance_id, plugin_name,
-                                        status)
+                if instance_id is not None:
+                    self._set_plugin_status(osutils, instance_id, plugin_name,
+                                            status)
                 return reboot_required
             except Exception as ex:
                 LOG.error('plugin \'%(plugin_name)s\' failed with error '
@@ -94,38 +92,120 @@ class InitManager(object):
                               'supported' % plugin_name)
         return supported
 
-    def configure_host(self):
-        LOG.info('Cloudbase-Init version: %s', version.get_version())
+    @staticmethod
+    def _check_latest_version():
+        if CONF.check_latest_version:
+            log_version = functools.partial(
+                LOG.info, 'Found new version of cloudbase-init %s')
+            version.check_latest_version(log_version)
 
+    def _handle_plugins_stage(self, osutils, service, instance_id, stage):
+        plugins_shared_data = {}
+        reboot_required = False
+        plugins = plugins_factory.load_plugins(stage)
+
+        LOG.info('Executing plugins for stage %r:', stage)
+
+        for plugin in plugins:
+            if self._check_plugin_os_requirements(osutils, plugin):
+                if self._exec_plugin(osutils, service, plugin,
+                                     instance_id, plugins_shared_data):
+                    reboot_required = True
+                    if CONF.allow_reboot:
+                        break
+
+        return reboot_required
+
+    @staticmethod
+    def _reset_service_password_and_respawn(osutils):
+        """Avoid pass the hash attacks from cloned instances."""
+        credentials = osutils.reset_service_password()
+        if not credentials:
+            return
+
+        service_domain, service_user, service_password = credentials
+        _, current_user = osutils.get_current_user()
+        # Notes(alexcoman): No need to check domain as password reset applies
+        # to local users only.
+        if current_user != service_user:
+            LOG.debug("No need to respawn process. Current user: "
+                      "%(current_user)s. Service user: "
+                      "%(service_user)s",
+                      {"current_user": current_user,
+                       "service_user": service_user})
+            return
+
+        # Note(alexcoman): In order to avoid conflicts caused by the logging
+        # handlers being shared between the current process and the new one,
+        # any logging handlers for the current logger object will be closed.
+        # By doing so, the next time the logger is called, it will be created
+        # under the newly updated proccess, thus avoiding any issues or
+        # conflicts where the logging can't be done.
+        logging.release_logging_handlers("cloudbaseinit")
+
+        # Note(alexcoman): In some edge cases the sys.args doesn't contain
+        # the python executable. In order to avoid this kind of issue the
+        # sys.executable will be injected into the arguments if it's necessary.
+        arguments = sys.argv + ["--noreset_service_password"]
+        if os.path.basename(arguments[0]).endswith(".py"):
+            arguments.insert(0, sys.executable)
+
+        LOG.info("Respawning current process with updated credentials.")
+        token = osutils.create_user_logon_session(
+            service_user, service_password, service_domain,
+            logon_type=osutils.LOGON32_LOGON_BATCH)
+        exit_code = osutils.execute_process_as_user(token, arguments)
+        LOG.info("Process execution ended with exit code: %s", exit_code)
+        sys.exit(exit_code)
+
+    def configure_host(self):
+        service = None
         osutils = osutils_factory.get_os_utils()
+
+        if CONF.reset_service_password and sys.platform == 'win32':
+            self._reset_service_password_and_respawn(osutils)
+
+        LOG.info('Cloudbase-Init version: %s', version.get_version())
         osutils.wait_for_boot_completion()
 
-        service = metadata_factory.get_metadata_service()
-        LOG.info('Metadata service loaded: \'%s\'' %
-                 service.get_name())
+        reboot_required = self._handle_plugins_stage(
+            osutils, None, None,
+            plugins_base.PLUGIN_STAGE_PRE_NETWORKING)
 
-        instance_id = service.get_instance_id()
-        LOG.debug('Instance id: %s', instance_id)
+        self._check_latest_version()
 
-        plugins = plugins_factory.load_plugins()
-        plugins_shared_data = {}
+        if not (reboot_required and CONF.allow_reboot):
+            reboot_required = self._handle_plugins_stage(
+                osutils, None, None,
+                plugins_base.PLUGIN_STAGE_PRE_METADATA_DISCOVERY)
 
-        reboot_required = False
-        try:
-            for plugin in plugins:
-                if self._check_plugin_os_requirements(osutils, plugin):
-                    if self._exec_plugin(osutils, service, plugin,
-                                         instance_id, plugins_shared_data):
-                        reboot_required = True
-                        if CONF.allow_reboot:
-                            break
-        finally:
-            service.cleanup()
+        if not (reboot_required and CONF.allow_reboot):
+            try:
+                service = metadata_factory.get_metadata_service()
+            except exception.MetadaNotFoundException:
+                LOG.error("No metadata service found")
+        if service:
+            LOG.info('Metadata service loaded: \'%s\'' %
+                     service.get_name())
+
+            instance_id = service.get_instance_id()
+            LOG.debug('Instance id: %s', instance_id)
+
+            try:
+                reboot_required = self._handle_plugins_stage(
+                    osutils, service, instance_id,
+                    plugins_base.PLUGIN_STAGE_MAIN)
+            finally:
+                service.cleanup()
 
         if reboot_required and CONF.allow_reboot:
             try:
+                LOG.info("Rebooting")
                 osutils.reboot()
             except Exception as ex:
                 LOG.error('reboot failed with error \'%s\'' % ex)
-        elif CONF.stop_service_on_exit:
-            osutils.terminate()
+        else:
+            LOG.info("Plugins execution done")
+            if CONF.stop_service_on_exit:
+                LOG.info("Stopping Cloudbase-Init service")
+                osutils.terminate()

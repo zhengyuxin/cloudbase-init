@@ -25,13 +25,13 @@ try:
 except ImportError:
     import mock
 
-from oslo.config import cfg
+from oslo_log import log as oslo_logging
 
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit import exception
-from cloudbaseinit.openstack.common import log as logging
 
 
-CONF = cfg.CONF
+CONF = cloudbaseinit_conf.CONF
 
 
 @contextlib.contextmanager
@@ -103,7 +103,7 @@ class LogSnatcher(object):
     def __init__(self, logger_name):
         self._logger_name = logger_name
         self._snatch_handler = SnatchHandler()
-        self._logger = logging.getLogger(self._logger_name)
+        self._logger = oslo_logging.getLogger(self._logger_name)
         self._previous_level = self._logger.logger.getEffectiveLevel()
 
     def __enter__(self):
@@ -125,10 +125,14 @@ class ConfPatcher(object):
     #              but oslo.config.cfg doesn't support item
     #              assignment.
 
-    def __init__(self, key, value, conf=CONF):
-        self._original_value = conf.get(key)
+    def __init__(self, key, value, group=None, conf=CONF):
+        if group:
+            self._original_value = conf.get(group).get(key)
+        else:
+            self._original_value = conf.get(key)
         self._key = key
         self._value = value
+        self._group = group
         self._conf = conf
 
     def __call__(self, func, *args, **kwargs):
@@ -140,11 +144,13 @@ class ConfPatcher(object):
         return _wrapped_f
 
     def __enter__(self):
-        self._conf.set_override(self._key, self._value)
+        self._conf.set_override(self._key, self._value,
+                                group=self._group)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._conf.set_override(self._key, self._original_value)
+        self._conf.set_override(self._key, self._original_value,
+                                group=self._group)
 
 
 class CloudbaseInitTestBase(unittest.TestCase):

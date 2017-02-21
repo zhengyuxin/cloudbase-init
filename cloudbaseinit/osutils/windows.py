@@ -18,26 +18,32 @@ from ctypes import wintypes
 import os
 import re
 import struct
+import subprocess
 import time
 
+from oslo_log import log as oslo_logging
 import pywintypes
 import six
 from six.moves import winreg
 from tzlocal import windows_tz
 from win32com import client
+import win32net
+import win32netcon
 import win32process
 import win32security
+import win32service
+import winerror
 import wmi
 
 from cloudbaseinit import exception
-from cloudbaseinit.openstack.common import log as logging
 from cloudbaseinit.osutils import base
+from cloudbaseinit.utils.windows import disk
 from cloudbaseinit.utils.windows import network
 from cloudbaseinit.utils.windows import privilege
 from cloudbaseinit.utils.windows import timezone
 
 
-LOG = logging.getLogger(__name__)
+LOG = oslo_logging.getLogger(__name__)
 AF_INET6 = 23
 UNICAST = 1
 MANUAL = 1
@@ -51,6 +57,8 @@ iphlpapi = ctypes.windll.iphlpapi
 Ws2_32 = ctypes.windll.Ws2_32
 setupapi = ctypes.windll.setupapi
 msvcrt = ctypes.cdll.msvcrt
+ntdll = ctypes.windll.ntdll
+secur32 = ctypes.windll.secur32
 
 
 class Win32_PROFILEINFO(ctypes.Structure):
@@ -106,39 +114,18 @@ class Win32_OSVERSIONINFOEX_W(ctypes.Structure):
         ('dwBuildNumber', wintypes.DWORD),
         ('dwPlatformId', wintypes.DWORD),
         ('szCSDVersion', wintypes.WCHAR * 128),
-        ('wServicePackMajor', wintypes.DWORD),
-        ('wServicePackMinor', wintypes.DWORD),
-        ('wSuiteMask', wintypes.DWORD),
+        ('wServicePackMajor', wintypes.WORD),
+        ('wServicePackMinor', wintypes.WORD),
+        ('wSuiteMask', wintypes.WORD),
         ('wProductType', wintypes.BYTE),
         ('wReserved', wintypes.BYTE)
     ]
 
 
-class GUID(ctypes.Structure):
-    _fields_ = [
-        ("data1", ctypes.wintypes.DWORD),
-        ("data2", ctypes.wintypes.WORD),
-        ("data3", ctypes.wintypes.WORD),
-        ("data4", ctypes.c_byte * 8)]
-
-    def __init__(self, l, w1, w2, b1, b2, b3, b4, b5, b6, b7, b8):
-        self.data1 = l
-        self.data2 = w1
-        self.data3 = w2
-        self.data4[0] = b1
-        self.data4[1] = b2
-        self.data4[2] = b3
-        self.data4[3] = b4
-        self.data4[4] = b5
-        self.data4[5] = b6
-        self.data4[6] = b7
-        self.data4[7] = b8
-
-
 class Win32_SP_DEVICE_INTERFACE_DATA(ctypes.Structure):
     _fields_ = [
         ('cbSize', wintypes.DWORD),
-        ('InterfaceClassGuid', GUID),
+        ('InterfaceClassGuid', disk.GUID),
         ('Flags', wintypes.DWORD),
         ('Reserved', ctypes.POINTER(wintypes.ULONG))
     ]
@@ -159,16 +146,63 @@ class Win32_STORAGE_DEVICE_NUMBER(ctypes.Structure):
     ]
 
 
+class Win32_STARTUPINFO_W(ctypes.Structure):
+    _fields_ = [
+        ('cb', wintypes.DWORD),
+        ('lpReserved', wintypes.LPWSTR),
+        ('lpDesktop', wintypes.LPWSTR),
+        ('lpTitle', wintypes.LPWSTR),
+        ('dwX', wintypes.DWORD),
+        ('dwY', wintypes.DWORD),
+        ('dwXSize', wintypes.DWORD),
+        ('dwYSize', wintypes.DWORD),
+        ('dwXCountChars', wintypes.DWORD),
+        ('dwYCountChars', wintypes.DWORD),
+        ('dwFillAttribute', wintypes.DWORD),
+        ('dwFlags', wintypes.DWORD),
+        ('wShowWindow', wintypes.WORD),
+        ('cbReserved2', wintypes.WORD),
+        ('lpReserved2', ctypes.POINTER(wintypes.BYTE)),
+        ('hStdInput', wintypes.HANDLE),
+        ('hStdOutput', wintypes.HANDLE),
+        ('hStdError', wintypes.HANDLE),
+    ]
+
+
+class Win32_PROCESS_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ('hProcess', wintypes.HANDLE),
+        ('hThread', wintypes.HANDLE),
+        ('dwProcessId', wintypes.DWORD),
+        ('dwThreadId', wintypes.DWORD),
+    ]
+
+
+advapi32.CreateProcessAsUserW.argtypes = [wintypes.HANDLE,
+                                          wintypes.LPCWSTR,
+                                          wintypes.LPWSTR,
+                                          ctypes.c_void_p,
+                                          ctypes.c_void_p,
+                                          wintypes.BOOL,
+                                          wintypes.DWORD,
+                                          ctypes.c_void_p,
+                                          wintypes.LPCWSTR,
+                                          ctypes.POINTER(
+                                              Win32_STARTUPINFO_W),
+                                          ctypes.POINTER(
+                                              Win32_PROCESS_INFORMATION)]
+advapi32.CreateProcessAsUserW.restype = wintypes.BOOL
+
 msvcrt.malloc.argtypes = [ctypes.c_size_t]
 msvcrt.malloc.restype = ctypes.c_void_p
 
 msvcrt.free.argtypes = [ctypes.c_void_p]
 msvcrt.free.restype = None
 
-kernel32.VerifyVersionInfoW.argtypes = [
+ntdll.RtlVerifyVersionInfo.argtypes = [
     ctypes.POINTER(Win32_OSVERSIONINFOEX_W),
     wintypes.DWORD, wintypes.ULARGE_INTEGER]
-kernel32.VerifyVersionInfoW.restype = wintypes.BOOL
+ntdll.RtlVerifyVersionInfo.restype = wintypes.DWORD
 
 kernel32.VerSetConditionMask.argtypes = [wintypes.ULARGE_INTEGER,
                                          wintypes.DWORD,
@@ -216,7 +250,12 @@ iphlpapi.GetIpForwardTable.restype = wintypes.DWORD
 
 Ws2_32.inet_ntoa.restype = ctypes.c_char_p
 
-setupapi.SetupDiGetClassDevsW.argtypes = [ctypes.POINTER(GUID),
+secur32.GetUserNameExW.argtypes = [wintypes.DWORD,
+                                   wintypes.LPWSTR,
+                                   ctypes.POINTER(wintypes.ULONG)]
+secur32.GetUserNameExW.restype = wintypes.BOOL
+
+setupapi.SetupDiGetClassDevsW.argtypes = [ctypes.POINTER(disk.GUID),
                                           wintypes.LPCWSTR,
                                           wintypes.HANDLE,
                                           wintypes.DWORD]
@@ -225,7 +264,7 @@ setupapi.SetupDiGetClassDevsW.restype = wintypes.HANDLE
 setupapi.SetupDiEnumDeviceInterfaces.argtypes = [
     wintypes.HANDLE,
     wintypes.LPVOID,
-    ctypes.POINTER(GUID),
+    ctypes.POINTER(disk.GUID),
     wintypes.DWORD,
     ctypes.POINTER(Win32_SP_DEVICE_INTERFACE_DATA)]
 setupapi.SetupDiEnumDeviceInterfaces.restype = wintypes.BOOL
@@ -248,20 +287,22 @@ VER_BUILDNUMBER = 4
 
 VER_GREATER_EQUAL = 3
 
-GUID_DEVINTERFACE_DISK = GUID(0x53f56307, 0xb6bf, 0x11d0, 0x94, 0xf2,
-                              0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b)
+GUID_DEVINTERFACE_DISK = disk.GUID(0x53f56307, 0xb6bf, 0x11d0, 0x94, 0xf2,
+                                   0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b)
 
 
 class WindowsUtils(base.BaseOSUtils):
     NERR_GroupNotFound = 2220
+    NERR_UserNotFound = 2221
     ERROR_ACCESS_DENIED = 5
     ERROR_INSUFFICIENT_BUFFER = 122
     ERROR_NO_DATA = 232
     ERROR_NO_SUCH_MEMBER = 1387
     ERROR_MEMBER_IN_ALIAS = 1378
     ERROR_INVALID_MEMBER = 1388
-    ERROR_OLD_WIN_VERSION = 1150
     ERROR_NO_MORE_FILES = 18
+
+    STATUS_REVISION_MISMATCH = 0xC0000059
 
     ADS_UF_PASSWORD_EXPIRED = 0x800000
     PASSWORD_CHANGED_FLAG = 1
@@ -281,6 +322,18 @@ class WindowsUtils(base.BaseOSUtils):
     DIGCF_DEVICEINTERFACE = 0x10
 
     DRIVE_CDROM = 5
+
+    INFINITE = 0xFFFFFFFF
+
+    CREATE_NEW_CONSOLE = 0x10
+
+    LOGON32_LOGON_BATCH = 4
+    LOGON32_LOGON_INTERACTIVE = 2
+    LOGON32_LOGON_SERVICE = 5
+
+    LOGON32_PROVIDER_DEFAULT = 0
+
+    EXTENDED_NAME_FORMAT_SAM_COMPATIBLE = 2
 
     SERVICE_STATUS_STOPPED = "Stopped"
     SERVICE_STATUS_START_PENDING = "Start Pending"
@@ -307,82 +360,87 @@ class WindowsUtils(base.BaseOSUtils):
 
     def reboot(self):
         with privilege.acquire_privilege(win32security.SE_SHUTDOWN_NAME):
-            ret_val = advapi32.InitiateSystemShutdownW(
+            ret_val = advapi32.InitiateSystemShutdownExW(
                 0, "Cloudbase-Init reboot",
-                0, True, True)
+                0, True, True, 0)
             if not ret_val:
                 raise exception.WindowsCloudbaseInitException(
                     "Reboot failed: %r")
 
-    def _get_user_wmi_object(self, username):
-        conn = wmi.WMI(moniker='//./root/cimv2')
-        username_san = self._sanitize_wmi_input(username)
-        q = conn.query('SELECT * FROM Win32_Account where name = '
-                       '\'%s\'' % username_san)
-        if len(q) > 0:
-            return q[0]
-        return None
-
     def user_exists(self, username):
-        return self._get_user_wmi_object(username) is not None
-
-    def _get_adsi_object(self, hostname='.', object_name=None,
-                         object_type='computer'):
-        adsi = client.Dispatch("ADsNameSpaces")
-        winnt = adsi.GetObject("", "WinNT:")
-        query = "WinNT://%s" % hostname
-        if object_name:
-            object_name_san = self.sanitize_shell_input(object_name)
-            query += "/%s" % object_name_san
-        query += ",%s" % object_type
-        return winnt.OpenDSObject(query, "", "", 0)
-
-    def _create_or_change_user(self, username, password, create,
-                               password_expires):
         try:
-            if create:
-                host = self._get_adsi_object()
-                user = host.Create('user', username)
-            else:
-                user = self._get_adsi_object(object_name=username,
-                                             object_type='user')
-
-            user.setpassword(password)
-            user.SetInfo()
-
-            self._set_user_password_expiration(username, password_expires)
-        except pywintypes.com_error as ex:
-            if create:
-                msg = "Create user failed: %s"
-            else:
-                msg = "Set user password failed: %s"
-            raise exception.CloudbaseInitException(msg % ex.excepinfo[2])
-
-    def _sanitize_wmi_input(self, value):
-        return value.replace('\'', '\'\'')
-
-    def _set_user_password_expiration(self, username, password_expires):
-        r = self._get_user_wmi_object(username)
-        if not r:
+            self._get_user_info(username, 1)
+            return True
+        except exception.ItemNotFoundException:
+            # User not found
             return False
-        r.PasswordExpires = password_expires
-        r.Put_()
-        return True
 
     def create_user(self, username, password, password_expires=False):
-        self._create_or_change_user(username, password, create=True,
-                                    password_expires=password_expires)
+        user_info = {
+            "name": username,
+            "password": password,
+            "priv": win32netcon.USER_PRIV_USER,
+            "flags": win32netcon.UF_NORMAL_ACCOUNT | win32netcon.UF_SCRIPT,
+        }
+
+        if not password_expires:
+            user_info["flags"] |= win32netcon.UF_DONT_EXPIRE_PASSWD
+
+        try:
+            win32net.NetUserAdd(None, 1, user_info)
+        except win32net.error as ex:
+            raise exception.CloudbaseInitException(
+                "Create user failed: %s" % ex.args[2])
+
+    def _get_user_info(self, username, level):
+        try:
+            return win32net.NetUserGetInfo(None, username, level)
+        except win32net.error as ex:
+            if ex.args[0] == self.NERR_UserNotFound:
+                raise exception.ItemNotFoundException(
+                    "User not found: %s" % username)
+            else:
+                raise exception.CloudbaseInitException(
+                    "Failed to get user info: %s" % ex.args[2])
 
     def set_user_password(self, username, password, password_expires=False):
-        self._create_or_change_user(username, password, create=False,
-                                    password_expires=password_expires)
+        user_info = self._get_user_info(username, 1)
+        user_info["password"] = password
+
+        if password_expires:
+            user_info["flags"] &= ~win32netcon.UF_DONT_EXPIRE_PASSWD
+        else:
+            user_info["flags"] |= win32netcon.UF_DONT_EXPIRE_PASSWD
+
+        try:
+            win32net.NetUserSetInfo(None, username, 1, user_info)
+        except win32net.error as ex:
+            raise exception.CloudbaseInitException(
+                "Set user password failed: %s" % ex.args[2])
+
+    def change_password_next_logon(self, username):
+        """Force the given user to change the password at next logon."""
+        user_info = self._get_user_info(username, 4)
+        user_info["flags"] &= ~win32netcon.UF_DONT_EXPIRE_PASSWD
+        user_info["password_expired"] = 1
+
+        try:
+            win32net.NetUserSetInfo(None, username, 4, user_info)
+        except win32net.error as ex:
+            raise exception.CloudbaseInitException(
+                "Setting password expiration failed: %s" % ex.args[2])
+
+    @staticmethod
+    def _get_cch_referenced_domain_name(domain_name):
+        return wintypes.DWORD(
+            ctypes.sizeof(domain_name) // ctypes.sizeof(wintypes.WCHAR))
 
     def _get_user_sid_and_domain(self, username):
         sid = ctypes.create_string_buffer(1024)
         cbSid = wintypes.DWORD(ctypes.sizeof(sid))
         domainName = ctypes.create_unicode_buffer(1024)
-        cchReferencedDomainName = wintypes.DWORD(
-            ctypes.sizeof(domainName) / ctypes.sizeof(wintypes.WCHAR))
+        cchReferencedDomainName = self._get_cch_referenced_domain_name(
+            domainName)
         sidNameUse = wintypes.DWORD()
 
         ret_val = advapi32.LookupAccountNameW(
@@ -400,7 +458,7 @@ class WindowsUtils(base.BaseOSUtils):
         lmi.lgrmi3_domainandname = six.text_type(username)
 
         ret_val = netapi32.NetLocalGroupAddMembers(0, six.text_type(groupname),
-                                                   3, ctypes.addressof(lmi), 1)
+                                                   3, ctypes.pointer(lmi), 1)
 
         if ret_val == self.NERR_GroupNotFound:
             raise exception.CloudbaseInitException('Group not found')
@@ -417,17 +475,25 @@ class WindowsUtils(base.BaseOSUtils):
             raise exception.CloudbaseInitException('Unknown error')
 
     def get_user_sid(self, username):
-        r = self._get_user_wmi_object(username)
-        if not r:
-            return None
-        return r.SID
+        try:
+            user_info = self._get_user_info(username, 4)
+            return str(user_info["user_sid"])[6:]
+        except exception.ItemNotFoundException:
+            # User not found
+            pass
 
     def create_user_logon_session(self, username, password, domain='.',
-                                  load_profile=True):
+                                  load_profile=True,
+                                  logon_type=LOGON32_LOGON_INTERACTIVE):
+        LOG.debug("Creating logon session for user: %(domain)s\\%(username)s",
+                  {"username": username, "domain": domain})
+
         token = wintypes.HANDLE()
         ret_val = advapi32.LogonUserW(six.text_type(username),
                                       six.text_type(domain),
-                                      six.text_type(password), 2, 0,
+                                      six.text_type(password),
+                                      logon_type,
+                                      self.LOGON32_PROVIDER_DEFAULT,
                                       ctypes.byref(token))
         if not ret_val:
             raise exception.WindowsCloudbaseInitException(
@@ -445,6 +511,70 @@ class WindowsUtils(base.BaseOSUtils):
 
         return token
 
+    def get_current_user(self):
+        """Get the user account name from the underlying instance."""
+        buf_len = wintypes.ULONG(512)
+        buf = ctypes.create_unicode_buffer(512)
+
+        ret_val = secur32.GetUserNameExW(
+            self.EXTENDED_NAME_FORMAT_SAM_COMPATIBLE,
+            buf, ctypes.byref(buf_len))
+        if not ret_val:
+            raise exception.WindowsCloudbaseInitException(
+                "GetUserNameExW failed: %r")
+
+        return buf.value.split("\\")
+
+    def execute_process_as_user(self, token, args, wait=True,
+                                new_console=False):
+        """Executes processes as an user.
+
+        :param token: Represents the user logon session token, resulted from
+                      running the 'create_user_logon_session' method.
+        :param args: The arguments with which the process will be runned with.
+        :param wait: Specifies if it's needed to wait for the process
+                     handler to finish up running all the operations
+                     on the process object.
+        :param new_console: Specifies whether the process should run
+                            under a new console or not.
+        :return: The exit code value resulted from the running process.
+        :rtype: int
+        """
+        LOG.debug("Executing process as user, command line: %s", args)
+
+        proc_info = Win32_PROCESS_INFORMATION()
+        startup_info = Win32_STARTUPINFO_W()
+        startup_info.cb = ctypes.sizeof(Win32_STARTUPINFO_W)
+        startup_info.lpDesktop = ""
+
+        flags = self.CREATE_NEW_CONSOLE if new_console else 0
+        cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline(args))
+
+        try:
+            ret_val = advapi32.CreateProcessAsUserW(
+                token, None, cmdline, None, None, False, flags, None, None,
+                ctypes.byref(startup_info), ctypes.byref(proc_info))
+            if not ret_val:
+                raise exception.WindowsCloudbaseInitException(
+                    "CreateProcessAsUserW failed: %r")
+
+            if wait and proc_info.hProcess:
+                kernel32.WaitForSingleObject(
+                    proc_info.hProcess, self.INFINITE)
+
+                exit_code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(
+                        proc_info.hProcess, ctypes.byref(exit_code)):
+                    raise exception.WindowsCloudbaseInitException(
+                        "GetExitCodeProcess failed: %r")
+
+                return exit_code.value
+        finally:
+            if proc_info.hProcess:
+                kernel32.CloseHandle(proc_info.hProcess)
+            if proc_info.hThread:
+                kernel32.CloseHandle(proc_info.hThread)
+
     def close_user_logon_session(self, token):
         kernel32.CloseHandle(token)
 
@@ -455,7 +585,7 @@ class WindowsUtils(base.BaseOSUtils):
                                 'Microsoft\\Windows NT\\CurrentVersion\\'
                                 'ProfileList\\%s' % user_sid) as key:
                 return winreg.QueryValueEx(key, 'ProfileImagePath')[0]
-        LOG.debug('Home directory not found for user \'%s\'' % username)
+        LOG.debug('Home directory not found for user %r', username)
         return None
 
     def sanitize_shell_input(self, value):
@@ -527,7 +657,7 @@ class WindowsUtils(base.BaseOSUtils):
             iface_index = iface_index_list[0]
 
             LOG.debug('Setting MTU for interface "%(mac_address)s" with '
-                      'value "%(mtu)s"' %
+                      'value "%(mtu)s"',
                       {'mac_address': mac_address, 'mtu': mtu})
 
             base_dir = self._get_system_dir()
@@ -560,7 +690,8 @@ class WindowsUtils(base.BaseOSUtils):
         (ret_val,) = adapter_config.EnableStatic([address], [netmask])
         if ret_val > 1:
             raise exception.CloudbaseInitException(
-                "Cannot set static IP address on network adapter")
+                "Cannot set static IP address on network adapter (%d)",
+                ret_val)
         reboot_required = (ret_val == 1)
 
         if gateway:
@@ -568,7 +699,8 @@ class WindowsUtils(base.BaseOSUtils):
             (ret_val,) = adapter_config.SetGateways([gateway], [1])
             if ret_val > 1:
                 raise exception.CloudbaseInitException(
-                    "Cannot set gateway on network adapter")
+                    "Cannot set gateway on network adapter (%d)",
+                    ret_val)
             reboot_required = reboot_required or ret_val == 1
 
         if dnsnameservers:
@@ -576,7 +708,8 @@ class WindowsUtils(base.BaseOSUtils):
             (ret_val,) = adapter_config.SetDNSServerSearchOrder(dnsnameservers)
             if ret_val > 1:
                 raise exception.CloudbaseInitException(
-                    "Cannot set DNS on network adapter")
+                    "Cannot set DNS on network adapter (%d)",
+                    ret_val)
             reboot_required = reboot_required or ret_val == 1
 
         return reboot_required
@@ -672,7 +805,7 @@ class WindowsUtils(base.BaseOSUtils):
                         break
                     time.sleep(1)
                     LOG.info('Waiting for sysprep completion. '
-                             'GeneralizationState: %d' % gen_state)
+                             'GeneralizationState: %d', gen_state)
         except WindowsError as ex:
             if ex.winerror == 2:
                 LOG.debug('Sysprep data not found in the registry, '
@@ -687,7 +820,14 @@ class WindowsUtils(base.BaseOSUtils):
             return service_list[0]
 
     def check_service_exists(self, service_name):
-        return self._get_service(service_name) is not None
+        try:
+            with self._get_service_handle(service_name):
+                return True
+        except pywintypes.error as ex:
+            print(ex)
+            if ex.winerror == winerror.ERROR_SERVICE_DOES_NOT_EXIST:
+                return False
+            raise
 
     def get_service_status(self, service_name):
         service = self._get_service(service_name)
@@ -708,7 +848,7 @@ class WindowsUtils(base.BaseOSUtils):
                                                'ret_val': ret_val})
 
     def start_service(self, service_name):
-        LOG.debug('Starting service %s' % service_name)
+        LOG.debug('Starting service %s', service_name)
         service = self._get_service(service_name)
         (ret_val,) = service.StartService()
         if ret_val != 0:
@@ -718,7 +858,7 @@ class WindowsUtils(base.BaseOSUtils):
                                  'ret_val': ret_val})
 
     def stop_service(self, service_name):
-        LOG.debug('Stopping service %s' % service_name)
+        LOG.debug('Stopping service %s', service_name)
         service = self._get_service(service_name)
         (ret_val,) = service.StopService()
         if ret_val != 0:
@@ -726,6 +866,70 @@ class WindowsUtils(base.BaseOSUtils):
                 'Stopping service %(service_name)s failed with return value:'
                 ' %(ret_val)d' % {'service_name': service_name,
                                   'ret_val': ret_val})
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _get_service_handle(service_name,
+                            service_access=win32service.SERVICE_QUERY_CONFIG,
+                            scm_access=win32service.SC_MANAGER_CONNECT):
+        hscm = win32service.OpenSCManager(None, None, scm_access)
+        hs = None
+        try:
+            hs = win32service.OpenService(hscm, service_name, service_access)
+            yield hs
+        finally:
+            if hs:
+                win32service.CloseServiceHandle(hs)
+            win32service.CloseServiceHandle(hscm)
+
+    def set_service_credentials(self, service_name, username, password):
+        LOG.debug('Setting service credentials: %s', service_name)
+        with self._get_service_handle(
+                service_name, win32service.SERVICE_CHANGE_CONFIG) as hs:
+            win32service.ChangeServiceConfig(
+                hs,
+                win32service.SERVICE_NO_CHANGE,
+                win32service.SERVICE_NO_CHANGE,
+                win32service.SERVICE_NO_CHANGE,
+                None,
+                None,
+                False,
+                None,
+                username,
+                password,
+                None)
+
+    def get_service_username(self, service_name):
+        LOG.debug('Getting service username: %s', service_name)
+        with self._get_service_handle(service_name) as hs:
+            cfg = win32service.QueryServiceConfig(hs)
+            return cfg[7]
+
+    def reset_service_password(self):
+        """This is needed to avoid pass the hash attacks."""
+        if not self.check_service_exists(self._service_name):
+            LOG.info("Service does not exist: %s", self._service_name)
+            return None
+
+        service_username = self.get_service_username(self._service_name)
+        # Ignore builtin accounts
+        if "\\" not in service_username:
+            LOG.info("Skipping password reset, service running as a built-in "
+                     "account: %s", service_username)
+            return None
+        domain, username = service_username.split('\\')
+        if domain != ".":
+            LOG.info("Skipping password reset, service running as a domain "
+                     "account: %s", service_username)
+            return None
+
+        LOG.debug('Resetting password for service user: %s', service_username)
+        maximum_length = self.get_maximum_password_length()
+        password = self.generate_random_password(maximum_length)
+        self.set_user_password(username, password)
+        self.set_service_credentials(
+            self._service_name, service_username, password)
+        return domain, username, password
 
     def terminate(self):
         # Wait for the service to start. Polling the service "Started" property
@@ -831,17 +1035,14 @@ class WindowsUtils(base.BaseOSUtils):
                                                 VER_GREATER_EQUAL)
 
         type_mask = VER_MAJORVERSION | VER_MINORVERSION | VER_BUILDNUMBER
-        ret_val = kernel32.VerifyVersionInfoW(ctypes.byref(vi), type_mask,
-                                              mask)
-        if ret_val:
+        ret_val = ntdll.RtlVerifyVersionInfo(ctypes.byref(vi), type_mask, mask)
+        if not ret_val:
             return True
+        elif ret_val == self.STATUS_REVISION_MISMATCH:
+            return False
         else:
-            err = kernel32.GetLastError()
-            if err == self.ERROR_OLD_WIN_VERSION:
-                return False
-            else:
-                raise exception.CloudbaseInitException(
-                    "VerifyVersionInfo failed with error: %s" % err)
+            raise exception.CloudbaseInitException(
+                "RtlVerifyVersionInfo failed with error: %s" % ret_val)
 
     def get_volume_label(self, drive):
         max_label_size = 261
@@ -978,6 +1179,33 @@ class WindowsUtils(base.BaseOSUtils):
 
         return physical_disks
 
+    def get_volumes(self):
+        """Retrieve a list with all the volumes found on all disks."""
+        volumes = []
+        volume = ctypes.create_unicode_buffer(chr(0) * self.MAX_PATH)
+
+        handle_volumes = kernel32.FindFirstVolumeW(volume, self.MAX_PATH)
+        if handle_volumes == self.INVALID_HANDLE_VALUE:
+            raise exception.WindowsCloudbaseInitException(
+                "FindFirstVolumeW failed: %r")
+
+        try:
+            while True:
+                volumes.append(volume.value)
+                found = kernel32.FindNextVolumeW(handle_volumes, volume,
+                                                 self.MAX_PATH)
+                if not found:
+                    errno = ctypes.GetLastError()
+                    if errno == self.ERROR_NO_MORE_FILES:
+                        break
+                    else:
+                        raise exception.WindowsCloudbaseInitException(
+                            "FindNextVolumeW failed: %r")
+        finally:
+            kernel32.FindVolumeClose(handle_volumes)
+
+        return volumes
+
     def _get_fw_protocol(self, protocol):
         if protocol == self.PROTOCOL_TCP:
             fw_protocol = self._FW_IP_PROTOCOL_TCP
@@ -1040,43 +1268,7 @@ class WindowsUtils(base.BaseOSUtils):
         C:\Windows\(System32|SysWOW64|Sysnative).
         Note that "Sysnative" is just an alias (doesn't really exist on disk).
 
-        On 32bit OSes, the return value will be the System32 directory,
-        which contains 32bit programs.
-        On 64bit OSes, the return value may be different, depending on the
-        Python bits and the `sysnative` parameter. If the Python interpreter is
-        32bit, the return value will be System32 (containing 32bit
-        programs) if `sysnative` is set to False and Sysnative otherwise. But
-        if the Python interpreter is 64bit and `sysnative` is False, the return
-        value will be SysWOW64 and System32 for a True value of `sysnative`.
-
-        Why this behavior and what is the purpose of `sysnative` parameter?
-
-        On a 32bit OS the things are clear, there is one System32 directory
-        containing 32bit applications and that's all. On a 64bit OS, there's a
-        System32 directory containing 64bit applications and a compatibility
-        one named SysWOW64 (WindowsOnWindows) containing the 32bit version of
-        them. Depending on the Python interpreter's bits, the `sysnative` flag
-        will try to bring the appropriate version of the system directory, more
-        exactly, the physical System32 or SysWOW64 found on disk. On a WOW case
-        (32bit interpreter on 64bit OS), a return value of System32 will point
-        to the physical SysWOW64 directory and a return value of Sysnative,
-        which is consolidated by the existence of this alias, will point to the
-        real physical System32 directory found on disk. If the OS is still
-        64bit and there is no WOW case (that means the interpreter is 64bit),
-        the system native concept is out of discussion and each return value
-        will point to the physical location it intends to.
-
-        On a 32bit OS the `sysnative` parameter has no meaning, but on a 64bit
-        one, based on its value, it will provide a real/alias path pointing to
-        system native applications if set to True (64bit programs) and to
-        system compatibility applications if set to False (32bit programs). Its
-        purpose is to provide the correct system paths by taking into account
-        the Python interpreter bits too, because on a 32bit interpreter
-        version, System32 is not the same with the System32 on a 64bit
-        interpreter. Also, using a 64bit interpreter, the Sysnative alias will
-        not work, but the `sysnative` parameter will take care to return
-        SysWOW64 if you explicitly want 32bit applications, by setting it to
-        False.
+        More info about this can be found in documentation.
         """
         if sysnative and self.check_sysnative_dir_exists():
             return self.get_sysnative_dir()
@@ -1084,14 +1276,33 @@ class WindowsUtils(base.BaseOSUtils):
             return self.get_syswow64_dir()
         return self.get_system32_dir()
 
+    def is_nano_server(self):
+        return self._check_server_level("NanoServer")
+
+    def _check_server_level(self, server_level):
+        try:
+            with winreg.OpenKey(
+                    winreg.HKEY_LOCAL_MACHINE,
+                    "Software\\Microsoft\\Windows NT\\CurrentVersion\\Server\\"
+                    "ServerLevels") as key:
+                return winreg.QueryValueEx(key, server_level)[0] == 1
+        except WindowsError as ex:
+            if ex.winerror == 2:
+                return False
+            else:
+                raise
+
     def execute_powershell_script(self, script_path, sysnative=True):
         base_dir = self._get_system_dir(sysnative)
         powershell_path = os.path.join(base_dir,
                                        'WindowsPowerShell\\v1.0\\'
                                        'powershell.exe')
 
-        args = [powershell_path, '-ExecutionPolicy', 'RemoteSigned',
-                '-NonInteractive', '-File', script_path]
+        args = [powershell_path]
+        if not self.is_nano_server():
+            args += ['-ExecutionPolicy', 'RemoteSigned', '-NonInteractive',
+                     '-File']
+        args.append(script_path)
 
         return self.execute_process(args, shell=False)
 
@@ -1111,11 +1322,3 @@ class WindowsUtils(base.BaseOSUtils):
             raise exception.CloudbaseInitException(
                 "The given timezone name is unrecognised: %r" % timezone_name)
         timezone.Timezone(windows_name).set(self)
-
-    def change_password_next_logon(self, username):
-        """Force the given user to change the password at next logon."""
-        user = self._get_adsi_object(object_name=username,
-                                     object_type='user')
-        user.Put('PasswordExpired', self.PASSWORD_CHANGED_FLAG)
-        user.Put('UserFlags', self.ADS_UF_PASSWORD_EXPIRED)
-        user.SetInfo()

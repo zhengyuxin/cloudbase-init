@@ -14,26 +14,18 @@
 
 import base64
 
-from oslo.config import cfg
+from oslo_log import log as oslo_logging
 
-from cloudbaseinit.openstack.common import log as logging
+from cloudbaseinit import conf as cloudbaseinit_conf
+from cloudbaseinit import constant
 from cloudbaseinit.osutils import factory as osutils_factory
 from cloudbaseinit.plugins.common import base
-from cloudbaseinit.plugins.common import constants
+from cloudbaseinit.plugins.common import constants as plugin_constant
 from cloudbaseinit.utils import crypt
 
 
-opts = [
-    cfg.BoolOpt('inject_user_password', default=True, help='Set the password '
-                'provided in the configuration. If False or no password is '
-                'provided, a random one will be set'),
-]
-
-CONF = cfg.CONF
-CONF.register_opts(opts)
-CONF.import_opt('username', 'cloudbaseinit.plugins.common.createuser')
-
-LOG = logging.getLogger(__name__)
+CONF = cloudbaseinit_conf.CONF
+LOG = oslo_logging.getLogger(__name__)
 
 
 class SetUserPasswordPlugin(base.BasePlugin):
@@ -61,7 +53,7 @@ class SetUserPasswordPlugin(base.BasePlugin):
             LOG.warn('Using admin_pass metadata user password. Consider '
                      'changing it as soon as possible')
         else:
-            password = shared_data.get(constants.SHARED_DATA_PASSWORD)
+            password = shared_data.get(plugin_constant.SHARED_DATA_PASSWORD)
 
         return password, injected
 
@@ -103,20 +95,29 @@ class SetUserPasswordPlugin(base.BasePlugin):
                 maximum_length)
 
         osutils.set_user_password(user_name, password)
-        self.post_set_password(user_name, password,
-                               password_injected=injected)
+        self._change_logon_behaviour(user_name, password_injected=injected)
         return password
 
-    def post_set_password(self, username, password, password_injected=False):
-        """Executes post set password logic.
+    def _change_logon_behaviour(self, username, password_injected=False):
+        """Post set password logic
 
-        This is called by :meth:`execute` after the password was set.
+        If the option is activated, force the user to change the
+        password at next logon.
         """
+        if CONF.first_logon_behaviour == constant.NEVER_CHANGE:
+            return
+
+        clear_text = (CONF.first_logon_behaviour ==
+                      constant.CLEAR_TEXT_INJECTED_ONLY)
+        always = CONF.first_logon_behaviour == constant.ALWAYS_CHANGE
+        if always or (clear_text and password_injected):
+            osutils = osutils_factory.get_os_utils()
+            osutils.change_password_next_logon(username)
 
     def execute(self, service, shared_data):
         # TODO(alexpilotti): The username selection logic must be set in the
         # CreateUserPlugin instead if using CONF.username
-        user_name = shared_data.get(constants.SHARED_DATA_USERNAME,
+        user_name = shared_data.get(plugin_constant.SHARED_DATA_USERNAME,
                                     CONF.username)
 
         osutils = osutils_factory.get_os_utils()
@@ -127,7 +128,7 @@ class SetUserPasswordPlugin(base.BasePlugin):
                 LOG.info('Password succesfully updated for user %s' %
                          user_name)
                 # TODO(alexpilotti): encrypt with DPAPI
-                shared_data[constants.SHARED_DATA_PASSWORD] = password
+                shared_data[plugin_constant.SHARED_DATA_PASSWORD] = password
 
                 if not service.can_post_password:
                     LOG.info('Cannot set the password in the metadata as it '

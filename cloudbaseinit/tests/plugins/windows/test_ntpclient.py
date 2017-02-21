@@ -18,12 +18,12 @@ try:
     import unittest.mock as mock
 except ImportError:
     import mock
-from oslo.config import cfg
 
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit import exception
 from cloudbaseinit.plugins.windows import ntpclient
 
-CONF = cfg.CONF
+CONF = cloudbaseinit_conf.CONF
 
 
 class NTPClientPluginTests(unittest.TestCase):
@@ -80,7 +80,7 @@ class NTPClientPluginTests(unittest.TestCase):
         mock_osutils.get_service_status.assert_called_with(
             ntpclient._W32TIME_SERVICE)
 
-        mock_osutils.check_os_version.assert_called_once_with(6, 0)
+        mock_osutils.check_os_version.assert_called_once_with(6, 1)
         if patch_check_os_version:
             mock_set_ntp_trigger_mode.assert_called_once_with(mock_osutils)
         else:

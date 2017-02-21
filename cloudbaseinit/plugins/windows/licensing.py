@@ -14,22 +14,16 @@
 
 import os
 
-from oslo.config import cfg
+from oslo_log import log as oslo_logging
 
+from cloudbaseinit import conf as cloudbaseinit_conf
 from cloudbaseinit import exception
-from cloudbaseinit.openstack.common import log as logging
 from cloudbaseinit.osutils import factory as osutils_factory
 from cloudbaseinit.plugins.common import base
 
-opts = [
-    cfg.BoolOpt('activate_windows', default=False,
-                help='Activates Windows automatically'),
-]
 
-CONF = cfg.CONF
-CONF.register_opts(opts)
-
-LOG = logging.getLogger(__name__)
+CONF = cloudbaseinit_conf.CONF
+LOG = oslo_logging.getLogger(__name__)
 
 
 class WindowsLicensingPlugin(base.BasePlugin):
@@ -59,12 +53,16 @@ class WindowsLicensingPlugin(base.BasePlugin):
     def execute(self, service, shared_data):
         osutils = osutils_factory.get_os_utils()
 
-        license_info = self._run_slmgr(osutils, ['/dlv'])
-        LOG.info('Microsoft Windows license info:\n%s' % license_info)
+        if osutils.is_nano_server():
+            LOG.info("Licensing info and activation are not available on "
+                     "Nano Server")
+        else:
+            license_info = self._run_slmgr(osutils, ['/dlv'])
+            LOG.info('Microsoft Windows license info:\n%s' % license_info)
 
-        if CONF.activate_windows:
-            LOG.info("Activating Windows")
-            activation_result = self._run_slmgr(osutils, ['/ato'])
-            LOG.debug("Activation result:\n%s" % activation_result)
+            if CONF.activate_windows:
+                LOG.info("Activating Windows")
+                activation_result = self._run_slmgr(osutils, ['/ato'])
+                LOG.debug("Activation result:\n%s" % activation_result)
 
         return base.PLUGIN_EXECUTION_DONE, False
